@@ -205,12 +205,24 @@ class TreeMemProvider(MemoryProvider):
                 except Exception:
                     continue
         lines = []
+        covered_to = 0
         for e in view:
             l, i = e["l"], e["i"]
             text = nodes.get((l, i))
             if text is None:
                 continue
             lines.append(f"{i * (2 ** l)}+{2 ** l}|{' '.join(text.split())}")
+            covered_to = max(covered_to, (i + 1) * (2 ** l))
+
+        # PROPOSAL §5: "A message not summarized yet shows as
+        # '(not summarized yet: zoom it)'." Without this, the un-summarized
+        # tail is a silent hole: the model cannot tell "never happened"
+        # from "not compressed yet", and zoom on it returns nothing.
+        tail_to = self._newest_message_id()
+        if tail_to > covered_to:
+            for mid in range(covered_to, tail_to):
+                lines.append(f"{mid}+1|(not summarized yet: zoom it)")
+
         body = "\n".join(lines)
         # The view is DESIGNED to be 64-128 KB (proposal §3). If the store is
         # over budget — the merge scheduler is behind — do NOT inject it whole:
@@ -229,6 +241,16 @@ class TreeMemProvider(MemoryProvider):
                            len(body.encode("utf-8")), _VIEW_HI, len(kept))
             body = "\n".join(kept)
         return body
+
+    def _newest_message_id(self) -> int:
+        """The newest message id the runtime has ingested (the store counter)."""
+        if not self._store:
+            return 0
+        sig = self._store / "build_signals.json"
+        try:
+            return int(json.loads(sig.read_text()).get("counter", 0))
+        except Exception:
+            return 0
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Inject the view before the turn (PROPOSAL §6: the view is the only

@@ -3,9 +3,9 @@
 Status: DRAFT v0.3 (post adversarial review 2026-10-08 — P1/P2 applied,
 P0s filed as §11 open verifications that BLOCK approval)
 Date: 2026-10-08
-Predecessor: Phase 1 audit (`<scripts dir>/unii_tree.py`, `<audit dir>/`)
+Predecessor: Phase 1 audit (`/opt/data/scripts/unii_tree.py`, `/opt/data/unii_audit/`)
 Design source: UniiChat/OptMem by Victor Taelin (gist 91837951)
-KPI gate: `<scripts dir>/mem_kpis.py` (bias warnings in its header and
+KPI gate: `/opt/data/scripts/mem_kpis.py` (bias warnings in its header and
 spec §10) — Phase 2 proceeds only if KPIs beat the Hermes-flat baseline on
 recall-without-search and stay within byte budget.
 
@@ -46,7 +46,7 @@ compaction to one flat 39 KB blob.
         summarizer workers (≤8 concurrent; model TBD per §11-V2)
 ```
 
-Location: `<TREE_MEM_ROOT>/<session_id>/` on the armitage host.
+Location: `/opt/data/tree-mem/<session_id>/` on the armitage host.
 In v0 the shadow layer is **read-only with respect to Hermes**: it observes
 state.db and maintains its own store. It does not touch the model's context
 until the injection question (§11-V1) is resolved.
@@ -146,7 +146,7 @@ is counted in build_signals.json (visible in KPI review).
 - Python 3.13 on armitage host (matches the runtime measured in Phase 1;
   stdlib only — jsonl parsing, no sqlite dependency in the tree layer).
 - One process in v0: `tree-mem.py serve --session <sid> --db
-  <state.db path>` polls (10 s) for new messages in Hermes
+  /opt/data/state.db` polls (10 s) for new messages in Hermes
   `state.db.messages` and appends them. In v0b (post-§11-V1) ownership
   changes per §11-V4; the poller then acts as BACKFILL only with an
   explicit handoff handshake, never as a second writer.
@@ -168,7 +168,7 @@ is counted in build_signals.json (visible in KPI review).
 ## 7. Rollback / kill switches (unchanged Hermes behavior)
 
 - `systemctl stop tree-mem@<sid>` → Hermes keeps running on its own system.
-- delete the store directory `<TREE_MEM_ROOT>/<sid>/` → complete; Hermes flat compact unaffected.
+- delete the store directory `/opt/data/tree-mem/<sid>/` → complete; Hermes flat compact unaffected.
 - Hermes' `/compress` still works; tree layer survives it independently
   (its view is its own, no interaction).
 
@@ -234,7 +234,7 @@ These BLOCK spec approval. Each gets resolved by experiment and recorded here.
 
 - [x] V1 — Context injection mechanism. **RESOLVED 2026-10-08 (option b: MCP
   tool the model calls each turn).** Evidence: `tree-mem` StreamableHTTP MCP
-  server (`<scripts dir>/tree-mem-mcp-server.py`, port 4310, bound
+  server (`/opt/data/scripts/tree-mem-mcp-server.py`, port 4310, bound
   127.0.0.1) registered in config.yaml and verified via `hermes mcp test
   tree-mem` (✓ Connected, 3 tools discovered). End-to-end calls verified from
   the Hermes container's own venv using the same client path the gateway
@@ -250,7 +250,7 @@ These BLOCK spec approval. Each gets resolved by experiment and recorded here.
 - [x] V2 — Summarizer model + rate limits. **RESOLVED 2026-10-08.** No local
   ollama exists on armitage (probed 4 candidate endpoints: refused/timeout).
   Nous inference API is the only model source; auth lives in
-  `~/.hermes/auth.json` (`providers.nous.access_token`, OAuth refresh,
+  `/opt/data/auth.json` (`providers.nous.access_token`, OAuth refresh,
   expires ~1 h — 2a must refresh via the portal flow or reuse Hermes'
   client). Findings: `tencent/hy3:free` free period ENDED (the audited
   session's own model is now 404 free); paid `tencent/hy3` blocked
@@ -308,7 +308,7 @@ These BLOCK spec approval. Each gets resolved by experiment and recorded here.
   chat); tree nodes add roughly 1/3 of that per the audit. No secret
   material beyond what state.db already holds — the log contains
   user-verbatim text exactly as state.db does; no new exposure class.
-- **Privacy note:** `<TREE_MEM_ROOT>/` inherits the same Access
+- **Privacy note:** `/opt/data/tree-mem/` inherits the same Access
   discipline as state.db (root/agent-writable, not world-readable; chmod
   640 on all files per §4) and is NOT copied to any repo or backup target
   not already containing state.db.
@@ -351,3 +351,250 @@ These BLOCK spec approval. Each gets resolved by experiment and recorded here.
      long-lived process may hold a stale copy in its own environment.
   4. When a model dies, re-probe the *whole provider list* and pick from what
      answers, rather than from what the config says exists.
+
+## 14. Making the MAIN memory lean (measured plan, 2026-10-21)
+
+### The constraint that decides the shape
+
+`MemoryManager` is *"Builtin provider (always first) plus at most one external
+provider."* The flat memory and the tree are **additive** — activating the tree
+does not replace the always-on block, it **adds 64-128 KB to every turn**.
+Taken naively, the tree makes context fatter, not leaner.
+
+So the leverage is not "activate the tree". It is **move weight out of the
+always-on block into a surface the tree can serve on demand**.
+
+### What is always-on today
+
+| surface | bytes | injected every turn? |
+|---|---|---|
+| `MEMORY.md` | 2,186 | yes (inject) |
+| `USER.md` | 895 | yes (inject) |
+| 7 topic files (ACTIVE, HOMELAB, MAURICIO, OSINT, PREFERENCES, PROJECTS, VOICE) | 34,590 | no (read on demand) |
+
+The always-on part is only ~3.0 KB — already lean. The fat is elsewhere:
+
+- **26 flat compaction artifacts = 382 KB** across 17 sessions. Each is a single
+  flat blob standing in for an entire conversation. This is the real waste.
+- **45,388 messages across 92 sessions** in this one Telegram chat. The tree
+  currently covers **one** session (5,050 units). The other 91 sessions are
+  invisible to it.
+
+### Measured coverage (not a guess)
+
+Token-overlap check of the always-on facts against the live tree view:
+
+- **6 of 14** durable always-on facts are *already* recoverable from the view
+  (Portainer homelab, secrets-not-in-repos, `execute_code`→`terminal()`,
+  cron-via-`delegate_task`, no-`.env`-in-stacks, SHARED-redis-on-infra-net).
+- Coverage of the routed topic files by the view: HOMELAB 53%, PREFERENCES 46%,
+  ACTIVE 42%, PROJECTS 37%, MAURICIO 30%, OSINT 31%, VOICE 22%.
+
+The uncovered facts are exactly the ones the tree *cannot* be trusted with:
+identity, style, estimation trust, provider state. Those stay in the always-on
+block. The covered ones can leave it.
+
+### The four moves, in dependency order
+
+**M1 — Build the chat-wide tree (the real win).**
+Scope the runtime by `chat_id`, not `session_id`: one tree over all 92 sessions
+and 45,388 messages. Cost is bounded because **76% of chat-wide messages are
+under 512 B and become their own node with no model call** — only ~10,874
+need the summarizer. At the measured ~100 units/min that is ~2 hours, not days.
+*Requires:* `fetch_rows` to select by `chat_id` (it currently filters
+`WHERE session_id=?`). The V3 fork/rewind logic must be reworked: with 92
+sessions, a "newer session" is normal, not a fork.
+
+**M2 — Route the durable facts out of `MEMORY.md`.**
+Move the 6 covered facts into a new `TREE.md`-style file that the tree
+*rebuilds from the log*, and leave `MEMORY.md` with only what the tree cannot
+serve (identity, trust, provider state). Net: `MEMORY.md` shrinks from 2,186
+to ~900 bytes; the facts are still retrievable, and better — they are
+retrievable *with context* ("you said X when we were fixing Y").
+*Requires:* M1, and a policy that the tree is the source of truth for
+routable facts.
+
+**M3 — Retire the flat compaction blobs.**
+Once the tree covers a session, its flat blob is redundant: the tree's graded
+view carries the same continuity in 64-128 KB instead of one 39 KB blob that
+replaces the whole conversation. **382 KB across 17 sessions** is the prize
+here. This is the *only* move that actually reduces the size of what Hermes
+carries per turn.
+*Requires:* M1, plus the KPI gate, plus Hermes' own `/compress` decision —
+which is why the spec keeps the flat path alive until then.
+
+**M4 — Point the topic files at the tree.**
+The 34,590 bytes of routed files are read on demand and are already lean *as
+files*. The improvement is not to shrink them but to make the tree the
+*index* over them: a view line that says "the HashPanel timezone fix is at
+HOMELAB.md §3" beats re-reading 6.4 KB of HOMELAB.md. That requires the tree
+to index the topic files as `note` units — one line each, never the whole file.
+
+### Honest costs and risks
+
+- **M1 changes the trust model.** One tree over 92 sessions mixes unrelated
+  conversations. The proposal's "latest word wins" handles recency but not
+  topic contamination: a fact about project A could be quoted while discussing
+  project B. Mitigation: the view is *graded by recency*, and zoom resolves
+  the exact message — but the agent must be told to zoom before acting on a
+  line from an old branch. **This is the main risk of M1.**
+- **M2 makes memory less auditable.** A file you can read is safer than a fact
+  the tree summarizes. Mitigation: the tree stores the *verbatim* source for
+  any unit ≤512 B, and `tree_zoom` returns the original message. Never
+  summarize a fact the user explicitly asked to remember.
+- **M3 is the only move that can *lose* information.** If the tree's recall
+  is worse than the flat blob, retiring the blob loses the conversation. This
+  is exactly what the KPI gate (K3: needle recall 47.4% flat vs tree) decides.
+  **Do not retire blobs before the gate passes.**
+- **Activation order matters.** M1 and M2 need the tree *running*; M3 needs the
+  tree *trusted*. They are sequential, and each one is reversible (a store
+  directory and a config line).
+
+### What NOT to do
+
+- **Do not shrink `MEMORY.md` by hand** to hit a number. A 900-byte memory
+  that omits the provider state and the estimate-trust rule is worse than a
+  2,186-byte one that doesn't.
+- **Do not disable the flat memory** when the tree activates. They are
+  additive by design; the flat path is the fallback when the tree is cold.
+- **Do not treat the 34,590 bytes of topic files as the problem.** They are
+  read on demand and cost nothing per turn. The problem is the 382 KB of flat
+  blobs and the 92 invisible sessions.
+
+## 15. Validating the §14 plan against the original gist (2026-10-21)
+
+§14 was written from measurement. It must also be measured against the
+proposal's own text, because a plan can be factually sound and still
+contradict the design it claims to implement.
+
+### The proposal's load-bearing claims
+
+| # | Gist text | Where |
+|---|---|---|
+| C1 | *"There is one chat, and it never ends."* | line 7 |
+| C2 | *"the chat itself is the memory"* | line 5 |
+| C3 | `note`: *"memories imported from before the chat"* | line 32 |
+| C4 | *"The user's own instructions follow it: who they are, how their files are organized, how they want work done."* | line 247 |
+| C5 | *"The user's words matter most… so most of an AGENTS.md becomes unneeded."* | line 323-324 |
+| C6 | *"The view holds only summaries, never a whole message, not even the last one."* | line 66 |
+| C7 | *"A message not summarized yet shows as \"(not summarized yet: zoom it)\""* | line 269 |
+| C8 | *"Never rebuild it from the log"* (the view) | line 153-155 |
+| C9 | *"Nothing carries over between turns: the view is the only continuity."* | line 339 |
+| C10 | *"Thinkings are shown but never logged"* | line 36 |
+
+### Verdict on each §14 move
+
+**M1 (chat-wide tree over 92 sessions) — VIOLATES the proposal. Must be
+rejected as stated.**
+
+C1 says the design is *one chat that never ends*. It does not say "one tree
+per conversation topic" or "one tree per user". A tree over 92 unrelated
+Telegram sessions is not "one chat" — it is a **multi-conversation
+container**, and the proposal has no notion of topic boundaries inside a
+chat. The concrete damage:
+
+- C2's "the chat itself is the memory" assumes the chat is a *coherent
+  discourse*. Merging a conversation about HashPanel with one about a
+  financial portfolio produces a tree whose lines are summaries of
+  *discontiguous* messages. §3's `due` ordering assumes a contiguous
+  message axis (`node(l,i)` covers `2^l` messages from `i·2^l` on) —
+  contiguity is structural, not cosmetic.
+- C9 says the view is the *only* continuity. A view that interleaves 92
+  conversations is not continuity, it is a haystack.
+
+**What M1 should have been.** The proposal's answer to "memory from before
+the chat" is C3: `note` units — *"memories imported from before the chat."*
+Durable facts are **imported as notes at the start of the chat**, not
+scooped up by widening the tree's scope. My §14 M1/M2 (widen the tree; move
+durable facts into the tree) **inverts C3**: the tree should *receive*
+imported memories, not *search harder* for them.
+
+**M2 (route durable facts out of MEMORY.md) — PARTIALLY VALID, but the
+mechanism is wrong.**
+
+The *goal* is supported: C4 says the user's own instructions (who they are,
+how they want work done) follow the system prompt, and C5 says the chat's
+own record makes *"most of an AGENTS.md unneeded"*. So the proposal really
+does expect durable context to migrate into the chat's record.
+
+But §14 M2 moved facts into the *tree* and out of the *always-on block*.
+C4 places the user's identity/style instructions **after** the system
+prompt, always present, every turn. The proposal does not propose
+routinely deleting them. The right shape is narrower:
+
+- Facts that are *about this project and this setup* (Portainer ops, the
+  homelab, the redis topology) → import as `note` units; they are
+  retrievable by zoom, and they are recorded with their context.
+- Facts that are *about the user as a person* (PT-BR, direct style, the
+  estimate-trust rule) → **stay in the always-on block.** C4 says so
+  explicitly. These are exactly the 8 of 14 facts the tree did NOT cover
+  (§14) — and §14 read that as "the tree is weak here". It is not. The
+  proposal *intends* the tree to be weak here.
+
+§14's own measurement already told us this and I misread it: the uncovered
+facts (identity, style, trust, provider state) are precisely C4's
+"who they are… how they want work done".
+
+**M3 (retire the flat compaction blobs) — SUPPORTED, with a correction.**
+
+C7 is the load-bearing detail §14 missed: a not-yet-summarized message
+shows as *"(not summarized yet: zoom it)"*. That is the proposal's answer
+to "what if the model needs something the tree hasn't compressed yet" — the
+model is told to **zoom**, and `zoom(id,1)` returns the message whole. So a
+flat blob is unnecessary *provided the view renders the placeholder*. Our
+runtime does not render that placeholder: `_read_view`/`view_context_for`
+**skip** unbuilt messages instead. That is a real implementation gap, and it
+must be fixed before M3 is safe.
+
+C6 also constrains M3: the view holds *only summaries* — never a whole
+message. Our v2 view is 610 KB, far over the proposal's 64-128 KB, because
+the merge scheduler is behind on a partially built tree. M3 is only valid
+once the view is inside its budget.
+
+**M4 (index the topic files in the tree) — SUPPORTED, and this is the
+proposal's own `note` mechanism.**
+
+§14 M4 described indexing topic files as `note` units. That is C3 exactly.
+Correct as written.
+
+### Two implementation gaps the gist exposed
+
+1. **The "(not summarized yet: zoom it)" placeholder is not implemented —
+   CONFIRMED, and it is the most serious gap found so far.**
+   Measured on the live v2 store: the view covers messages up to id **2,557**
+   while the counter is **5,054** — **2,497 messages are silently missing
+   from the view, with no placeholder.** The model cannot tell "never
+   happened" from "not compressed yet", and `tree_zoom` on an id in that
+   range returns nothing.
+
+   Must be added: every message id from the last built leaf to the newest
+   ingested message gets the placeholder line
+   `id+1|(not summarized yet: zoom it)`. This is what makes M3 (retiring
+   the flat blobs) safe — the model gets a legal way to reach the
+   un-summarized tail instead of a hole.
+
+2. ~~**Thoughts are not filtered.**~~ **Checked and CLEARED — not a gap.**
+   C10: *"Thoughts are shown but never logged."* `state.db` *does* carry a
+   `reasoning` column, but `fetch_rows()` selects only
+   `id, role, content, tool_name, tool_calls, timestamp, active` — the
+   reasoning column is never read, so thoughts are never logged. The rule
+   holds by construction. (Recorded because the column's presence made it
+   look like a live risk; it is not.)
+
+### Corrected plan
+
+| move | §14 said | Corrected |
+|---|---|---|
+| M1 | widen the tree to 92 sessions | **rejected.** Import durable facts as `note` units (C3) instead of widening scope. One chat, one tree. |
+| M2 | move 6 facts out of the always-on block | **split.** Project/setup facts → `note` units. Identity/style/trust facts → **stay** (C4). |
+| M3 | retire 26 flat blobs (382 KB) | **keep, but gated** on (a) the placeholder landing, (b) the view inside 64-128 KB, (c) the KPI gate. |
+| M4 | index topic files as notes | **keep as-is.** It is C3 verbatim. |
+| M5 | — | **new:** implement the placeholder (C7) and the thought filter (C10) before any of the above. |
+
+### The one-line summary
+
+The proposal's memory model is **one chat, forever, plus imported notes** —
+not one tree per corpus. §14's M1 tried to make the tree do the retrieval
+that `note` units and `zoom` are designed to do, and would have broken the
+contiguity that §3's arithmetic depends on. M2's split (project facts out,
+identity facts in) is the shape C4 actually prescribes.
