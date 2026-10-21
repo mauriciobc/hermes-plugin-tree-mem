@@ -36,8 +36,20 @@ VIEW_LO = 64_000
 MERGE_CTX_CAP = 24_000
 NOUS_BASE = os.environ.get("TREE_MEM_SUMMARIZER_BASE", "https://inference-api.nousresearch.com/v1")
 NOUS_MODEL = os.environ.get("TREE_MEM_SUMMARIZER_MODEL", "upstage/solar-mini4:free")
+def _hermes_home():
+    """Hermes' own home resolver (HERMES_HOME may point anywhere)."""
+    h = os.environ.get("HERMES_HOME", "").strip()
+    if h:
+        return h
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home())
+    except Exception:
+        return os.path.join(os.path.expanduser("~"), ".hermes")
+
+
 AUTH_JSON = os.environ.get("TREE_MEM_AUTH_JSON",
-                           os.path.join(os.path.expanduser("~"), ".hermes", "auth.json"))
+                           os.path.join(_hermes_home(), "auth.json"))
 NOTE_PREFIX = "[CONTEXT COMPACTION"
 
 log_lock = threading.Lock()
@@ -715,6 +727,22 @@ class Runtime:
 import sqlite3
 
 
+def _default_state_db():
+    """Resolve the Hermes state.db the way Hermes itself does.
+
+    Guessing "~/.hermes" is wrong on any install where HERMES_HOME points
+    elsewhere (this instance: /opt/data). Hermes' own resolver is
+    authoritative — use it, and fall back to the env var.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home() / "state.db")
+    except Exception:
+        home = os.environ.get("HERMES_HOME", "").strip() or os.path.join(
+            os.path.expanduser("~"), ".hermes")
+        return os.path.join(home, "state.db")
+
+
 def fetch_rows(db_path, sid, min_id):
     db = sqlite3.connect(DB_RO.format(db=db_path), uri=True)
     try:
@@ -762,7 +790,7 @@ def owner_claim(root):
 
 def serve(args):
     global LOG_PATH
-    default_root = os.environ.get("TREE_MEM_ROOT", "").strip() or os.path.join(os.path.expanduser("~"), ".hermes", "tree-mem")
+    default_root = os.environ.get("TREE_MEM_ROOT", "").strip() or os.path.join(_hermes_home(), "tree-mem")
     root = args.root or os.path.join(default_root, args.session)
     os.makedirs(root, exist_ok=True)
     LOG_PATH = os.path.join(root, "logs", "serve.log")
@@ -831,7 +859,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["serve"])
     ap.add_argument("--session", required=True)
-    ap.add_argument("--db", default=os.environ.get("TREE_MEM_DB", os.path.join(os.path.expanduser("~"), ".hermes", "state.db")))
+    ap.add_argument("--db", default=os.environ.get("TREE_MEM_DB", _default_state_db()))
     ap.add_argument("--root", default=None)
     ap.add_argument("--poll", type=float, default=10.0)
     ap.add_argument("--interval", type=float, default=1.0)
