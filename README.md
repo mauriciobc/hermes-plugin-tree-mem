@@ -138,3 +138,25 @@ The Hermes plugin packaging, the runtime, the KPI harness and the operating
 lessons are by Maurício Castro.
 
 MIT licensed. See [LICENSE](LICENSE).
+
+## Reaching the tree before the provider is activated
+
+The plugin is the eventual home of tree memory but stays **inert**
+(`memory.provider: ''`) until the KPI gate passes. Meanwhile the tree is
+reachable as plain tools over MCP:
+
+```bash
+python3 hermes-plugin-tree-mem/scripts/tree-mem-mcp-server.py \
+  --root "$HERMES_HOME/tree-mem/<session>" --port 4310
+```
+
+```yaml
+mcp_servers:
+  tree-mem:
+    url: http://127.0.0.1:4310/mcp
+    transport: streamable
+    enabled: true
+```
+
+A fresh session then gets `tree_view` / `tree_zoom` / `tree_date` and can
+reach the whole history on demand, with nothing injected into its context.

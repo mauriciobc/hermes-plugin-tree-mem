@@ -15,10 +15,7 @@ import os
 import subprocess
 import time
 
-_ROOT = os.environ.get("TREE_MEM_ROOT", "").strip() or os.path.join(
-    os.path.expanduser("~"), ".hermes", "tree-mem")
-_SID = os.environ.get("TREE_MEM_SESSION", "")
-S = os.path.join(_ROOT, _SID) if _SID else _ROOT
+S = "<hermes home>/tree-mem/20260826_170355_abad4b7a-v2"
 STALE_MINUTES = 8
 TOTAL = 5020
 

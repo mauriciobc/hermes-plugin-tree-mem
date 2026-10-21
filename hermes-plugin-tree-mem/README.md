@@ -22,6 +22,24 @@ context); `session_search` is for **precision** (exact string hits). "Zoom is
 the only allowed mechanism" is the proposal's rule for *its* agent; here both
 are exposed on purpose.
 
+## Operating notes (learned the hard way)
+
+- **An empty source is a fact, not an error.** Assistant turns with no content
+  have no summary; retrying them forever starved the merge queue and left the
+  view at 1.3 MB. They are recorded as `(empty message — no content)`.
+- **The merge scheduler needs a heartbeat.** Batch-merge used to start only as
+  a side effect of finishing a leaf, so it never ran once the leaves were done.
+  The poll loop now schedules it.
+- **Batch-merge is a queue task, not inline work.** Done inline it pinned one
+  worker to the whole job; as a queue task all 8 workers share the load.
+- **The client-side rate limit protects the free tier.** 0.25 s between calls
+  tripped the provider's HTTP 429 — and the 512-byte retry ladder makes up to
+  6 sequential calls per merge. The floor is 0.75 s.
+- **429 is "not now", not failure.** It is retried with backoff; treating it
+  as a failure stalled the queue.
+- **Views are capped, never whole.** Over budget, the newest lines are kept
+  and the truncation is stated in the output.
+
 ## Activation
 
 ```yaml
@@ -48,11 +66,39 @@ plugins/tree-mem/
 ├── __init__.py              # the MemoryProvider implementation
 ├── scripts/
 │   ├── tree-mem.py          # the runtime: poller, tree builder, merge scheduler
+│   ├── tree-mem-mcp-server.py  # the tools as a standalone MCP server
 │   ├── mem_kpis.py          # KPI verifier (K1–K7) for the keep-vs-kill gate
 │   ├── monitor_tree_mem_backfill.py
 │   └── tree_mem_backfill_watchdog.py
 └── docs/phase2_tree_memory_spec.md
 ```
+
+## Two ways to reach the tree
+
+The plugin is the eventual home of tree memory, but it is deliberately
+**inactive** (`memory.provider: ''`) until the KPI gate passes — that flip is
+Phase 2b live injection. Until then the tree is still reachable, as **tools**:
+
+```
+hermes plugins install tree-mem        # the provider (inert until the gate)
+python3 scripts/tree-mem-mcp-server.py --root $HERMES_HOME/tree-mem/<session> --port 4310
+```
+
+and register it:
+
+```yaml
+mcp_servers:
+  tree-mem:
+    url: http://127.0.0.1:4310/mcp
+    transport: streamable
+    timeout: 30
+    enabled: true
+```
+
+A fresh session then sees `tree_view` / `tree_zoom` / `tree_date` and can
+reach the whole history on demand — nothing injected, nothing paid per turn.
+The server hot-reloads as the tree is built (it parses only newly appended
+bytes) and caps the view at 128 KB, keeping the newest lines and saying so.
 
 The store itself (created at runtime):
 

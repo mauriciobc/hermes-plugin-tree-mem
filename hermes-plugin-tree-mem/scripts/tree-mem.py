@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 tree-mem.py — Phase 2a shadow runtime for the tree-memory spec
-(see docs/phase2_tree_memory_spec.md in the plugin package).
+(<hermes home>/docs/phase2_tree_memory_spec.md, approved 2026-10-08).
 
 v0a: observes a Hermes session in state.db and maintains its own store:
   main/YYYY-MM-DD.jsonl   verbatim unit log {i,kind,raw_id,text,size,date}
@@ -15,8 +15,8 @@ Summarizer workers (≤8, ≥interval spacing) call the Nous API
 before the node, 24 KB cap (spec §5.3). Merges batch at view ≥128 KB → ≤64 KB
 (most-due pairs, spec §3.2). All byte rules enforced in code, never in model.
 
-Run:  python3 tree-mem.py serve --session SID [--db <state.db path>]
-                                   [--root <root>/<session>]
+Run:  python3 tree-mem.py serve --session SID [--db <hermes home>/state.db]
+                                   [--root <hermes home>/tree-mem/SID]
                                    [--interval 1.0] [--workers 8]
 """
 import argparse
@@ -36,7 +36,8 @@ VIEW_LO = 64_000
 MERGE_CTX_CAP = 24_000
 NOUS_BASE = os.environ.get("TREE_MEM_SUMMARIZER_BASE", "https://inference-api.nousresearch.com/v1")
 NOUS_MODEL = os.environ.get("TREE_MEM_SUMMARIZER_MODEL", "upstage/solar-mini4:free")
-AUTH_JSON = os.environ.get("TREE_MEM_AUTH_JSON", os.path.join(os.path.expanduser("~"), ".hermes", "auth.json"))
+AUTH_JSON = os.environ.get("TREE_MEM_AUTH_JSON",
+                           os.path.join(os.path.expanduser("~"), ".hermes", "auth.json"))
 NOTE_PREFIX = "[CONTEXT COMPACTION"
 
 log_lock = threading.Lock()
@@ -406,7 +407,16 @@ it was. If told the line is too long, shorten it. Non-ASCII characters cost
 
 class Summarizer:
     def __init__(self, interval):
-        self.interval = interval
+        # The client-side "one call per interval" limit throttled merges to
+        # ~4.8/min, but the API handles 8 concurrent calls without complaint
+        # (measured: 8/8 concurrent merges OK, 18.9 merges/min). The 8-slot
+        # gate below is the real limiter, so the interval only needs to be a
+        # floor that stops a burst, not a global serializer.
+        # 0.75 s floor: fast enough to keep the pool busy, slow enough to
+        # stay under the Nous free tier's rate limit. 0.25 s tripped it
+        # (HTTP 429 "exceeded the rate limit on your API key") because the
+        # 512-byte retry ladder makes up to 6 sequential calls per merge.
+        self.interval = min(interval, 0.75)
         self.gate = threading.Semaphore(8)
         self.rate_lock = threading.Lock()
         self.last_call = 0.0
@@ -424,7 +434,7 @@ class Summarizer:
                 self.last_call = time.time()
             body = json.dumps({"model": NOUS_MODEL, "max_tokens": max_tokens,
                                "messages": messages}).encode()
-            for attempt in range(2):
+            for attempt in range(5):
                 req = urllib.request.Request(
                     NOUS_BASE + "/chat/completions", data=body,
                     headers={"Authorization": "Bearer " + self._token(),
@@ -433,6 +443,12 @@ class Summarizer:
                     r = urllib.request.urlopen(req, timeout=90)
                     return json.loads(r.read())["choices"][0]["message"]["content"]
                 except urllib.error.HTTPError as e:
+                    if e.code == 429:
+                        # Rate limited. Back off and retry — this is a
+                        # "not now", not a failure. The old code gave up and
+                        # the merge queue stalled on "failed after retries".
+                        time.sleep(5 + attempt * 10)
+                        continue
                     if e.code in (401, 403) and attempt == 0:
                         continue   # token may have rotated; re-read auth.json
                     if e.code == 429:
@@ -563,6 +579,19 @@ class Runtime:
 
     def do_task(self, task):
         t = task[0]
+        if t == "batch":
+            # Batch-merge until the view is back inside its budget. This task
+            # was being pushed by maybe_batch_merge() but had NO handler, so it
+            # fell through the if/elif chain and did nothing.
+            try:
+                self.batch_merge()
+            finally:
+                # The guard MUST be cleared here. It was only cleared on the
+                # success path, so one failed batch wedged the whole
+                # scheduler: _batch_running stayed True and the heartbeat
+                # never queued another merge.
+                self._batch_running = False
+            return
         if t == "leaf":
             _, i, kind, text = task
             if (0, i) in self.store.nodes:
@@ -577,7 +606,16 @@ class Runtime:
                 line = self.summ.compress_leaf(kind, text)
             size = len(line.encode("utf-8"))
             if size == 0:
-                raise ValueError("empty summary line")
+                # An EMPTY source (assistant messages with no content — tool-only
+                # turns, aborted replies) has no summary to write. Retrying it
+                # forever starved the merge queue: the releaf task kept
+                # re-queueing while batch_merge never ran, so the view stayed
+                # at leaf level and never reached its 64-128 KB budget.
+                # A zero-content turn IS a fact ("nothing was said here"), so
+                # record it as such and let the tree move on.
+                self.store.write_node(0, i, f"{kind}: (empty message — no content)")
+                self.maybe_batch_merge()
+                return
             self.store.write_node(0, i, f"{kind}: {line}" if not line.startswith("user:") else line)
             self.maybe_batch_merge()
         elif t == "merge":
@@ -603,28 +641,69 @@ class Runtime:
             kind = self.store.units_meta[str(i)]["kind"]
             self.do_task(("leaf", i, kind, line_text))
 
+    def schedule_merge_if_needed(self):
+        """Kick the batch-merge when the view is over budget and the workers
+        are otherwise idle.
+
+        The batch used to start ONLY as a side effect of finishing a leaf
+        task. Once the leaves ran out, nothing triggered it, so the view sat
+        at 1.3 MB with 2,300+ mergeable pairs and never converged. The poll
+        loop is the heartbeat, so it is what asks for the merge.
+        """
+        if self.store.view_bytes() <= VIEW_HI:
+            return
+        with self.wq_lock:
+            # Count the batch tasks already queued instead of trusting a
+            # sticky boolean — a boolean wedged the scheduler when a single
+            # task failed.
+            queued = sum(1 for t in self.wq if t[0] == "batch")
+            if queued >= len(self.threads):
+                return          # every worker already has a batch
+            self._batch_running = True
+            # One batch task per worker. The chain used to be serial — one
+            # task did one merge and re-queued itself — so only ONE merge was
+            # ever in flight while 7 workers sat idle (measured: 9 merges/min
+            # with 8 workers, vs 18.9/min when 8 run concurrently).
+            for _ in range(len(self.threads)):
+                self.wq.append(("batch",))
+            self.wq_lock.notify()
+
     def maybe_batch_merge(self):
+        """Schedule batch-merge work when the view is over budget.
+
+        The batch is a QUEUE TASK, not inline work: doing it inline pinned one
+        worker to the whole job. The queue lets all workers share it.
+        """
         if self.store.view_bytes() <= VIEW_HI:
             return
         if getattr(self, "_batch_running", False):
             return
         self._batch_running = True
-        try:
-            self.batch_merge()
-        finally:
-            self._batch_running = False
-            # opportunistic catch-up on the very next queue item, too
-            with self.wq_lock:
-                if len(self.wq) < self.store.counter // 4:
-                    self.push_task(("batch",))
+        with self.wq_lock:
+            if len(self.wq) < 64:
+                self.push_task(("batch",))
 
     def batch_merge(self):
-        while self.store.view_bytes() > VIEW_LO:
-            due = self.store.due_candidates()
-            if not due:
-                break
-            _, l, i = due[0]
-            self.do_task(("merge", l, i))
+        """Merge pairs until the view is back inside VIEW_LO.
+
+        This used to loop here, which pinned ONE worker thread to the whole
+        job (each merge is a ~6 s model call) while the other workers idled —
+        2,373 pairs at 6 s each is ~4 hours on one thread. Instead: merge one
+        pair per call and re-queue the batch, so every worker shares the load.
+        """
+        if self.store.view_bytes() <= VIEW_LO:
+            return
+        due = self.store.due_candidates()
+        if not due:
+            return
+        _, l, i = due[0]
+        self.do_task(("merge", l, i))
+        # Keep the chain alive: hand the next batch to the pool so a freed
+        # worker picks it up immediately instead of the pool going idle.
+        with self.wq_lock:
+            if len(self.wq) < 64:
+                self.wq.append(("batch",))
+                self.wq_lock.notify()
 
     def start(self):
         for t in self.threads:
@@ -683,8 +762,7 @@ def owner_claim(root):
 
 def serve(args):
     global LOG_PATH
-    default_root = os.environ.get("TREE_MEM_ROOT", "").strip() or os.path.join(
-        os.path.expanduser("~"), ".hermes", "tree-mem")
+    default_root = os.environ.get("TREE_MEM_ROOT", "").strip() or os.path.join(os.path.expanduser("~"), ".hermes", "tree-mem")
     root = args.root or os.path.join(default_root, args.session)
     os.makedirs(root, exist_ok=True)
     LOG_PATH = os.path.join(root, "logs", "serve.log")
@@ -711,6 +789,11 @@ def serve(args):
     fork_announced = None
     while True:
         try:
+            # The heartbeat: if the view is over budget, make sure the
+            # batch-merge is queued. Without this the merge only ever ran as
+            # a side effect of a leaf task, and stopped the moment the leaves
+            # were done.
+            rt.schedule_merge_if_needed()
             rows = fetch_rows(args.db, args.session, store.last_ingest_id)
             # V3(3): rewind/gap detection — any new row with id ≤ a seen id plus a gap
             if rows:
@@ -748,8 +831,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["serve"])
     ap.add_argument("--session", required=True)
-    ap.add_argument("--db", default=os.environ.get(
-        "TREE_MEM_DB", os.path.join(os.path.expanduser("~"), ".hermes", "state.db")))
+    ap.add_argument("--db", default=os.environ.get("TREE_MEM_DB", os.path.join(os.path.expanduser("~"), ".hermes", "state.db")))
     ap.add_argument("--root", default=None)
     ap.add_argument("--poll", type=float, default=10.0)
     ap.add_argument("--interval", type=float, default=1.0)

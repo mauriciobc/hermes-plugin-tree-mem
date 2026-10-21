@@ -22,18 +22,15 @@ import glob
 import json
 import os
 import subprocess
-from pathlib import Path
 import sys
 import time
 
-_ROOT = os.environ.get("TREE_MEM_ROOT", "").strip() or os.path.join(
-    os.path.expanduser("~"), ".hermes", "tree-mem")
-ROOT = os.path.join(_ROOT, SESSION) if SESSION else _ROOT
-SESSION = os.environ.get("TREE_MEM_SESSION", "")
+ROOT = "<hermes home>/tree-mem/20260826_170355_abad4b7a-v2"
+SESSION = "20260826_170355_abad4b7a"
 WATCH_MINUTES = 5
 LOG = f"{ROOT}/logs/serve.log"
-PY = os.environ.get("TREE_MEM_PYTHON", sys.executable)
-SCRIPT = os.environ.get("TREE_MEM_SCRIPT", "") or str(Path(__file__).resolve().parent / "tree-mem.py")
+PY = "/opt/hermes/.venv/bin/python3"
+SCRIPT = "<hermes home>/scripts/tree-mem.py"
 
 
 def leaves_built() -> int:

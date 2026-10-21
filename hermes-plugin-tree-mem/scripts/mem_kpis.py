@@ -28,7 +28,7 @@ needles before any keep-vs-kill decision. K4 tree depth is index arithmetic
 (directional only). Must be fixed before the 2026 kill/build decision.
 
 Usage:
-  python3 mem_kpis.py [--db <state.db path>] [--session SID] [--tree-dir DIR]
+  python3 mem_kpis.py [--db <hermes home>/state.db] [--session SID] [--tree-dir DIR]
                      [--view view.txt] [--artifacts out.json]
 
 Baseline side is computed from the live session DB (active rows + the flat
@@ -37,7 +37,6 @@ audit outputs (view.txt); for Phase 2 runtimes point --tree-dir at the
 tree-mem store and this script auto-detects live view.json.
 """
 import argparse
-import os
 import json
 import os
 import re
@@ -235,18 +234,18 @@ def user_msg_coverage(units, ctx_text):
 # ---- (f) MAIN ------------------------------------------------------------
 
 def load_units_for_sid(db_path, sid):
-    sys.path.insert(0, "<scripts dir>")
+    sys.path.insert(0, "<hermes home>/scripts")
     import unii_tree
     return unii_tree.load_units(db_path, sid)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default=os.environ.get("TREE_MEM_DB", os.path.join(os.path.expanduser("~"), ".hermes", "state.db")))
+    ap.add_argument("--db", default="<hermes home>/state.db")
     ap.add_argument("--session", default="20260826_170355_abad4b7a")
-    ap.add_argument("--tree-dir", default=os.environ.get("TREE_MEM_ROOT", os.path.join(os.path.expanduser("~"), ".hermes", "tree-mem")))
+    ap.add_argument("--tree-dir", default="<hermes home>/unii_audit/20260826_170355_abad4b7a")
     ap.add_argument("--max-needles", type=int, default=40)
-    ap.add_argument("--artifacts", default="mem_kpis_report.json")
+    ap.add_argument("--artifacts", default="<hermes home>/unii_audit/mem_kpis_report.json")
     args = ap.parse_args()
 
     db = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)

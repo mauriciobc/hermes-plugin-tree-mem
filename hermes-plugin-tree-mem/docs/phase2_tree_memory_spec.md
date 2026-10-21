@@ -3,9 +3,9 @@
 Status: DRAFT v0.3 (post adversarial review 2026-10-08 — P1/P2 applied,
 P0s filed as §11 open verifications that BLOCK approval)
 Date: 2026-10-08
-Predecessor: Phase 1 audit (`/opt/data/scripts/unii_tree.py`, `/opt/data/unii_audit/`)
+Predecessor: Phase 1 audit (`<data home>/scripts/unii_tree.py`, `<data home>/unii_audit/`)
 Design source: UniiChat/OptMem by Victor Taelin (gist 91837951)
-KPI gate: `/opt/data/scripts/mem_kpis.py` (bias warnings in its header and
+KPI gate: `<data home>/scripts/mem_kpis.py` (bias warnings in its header and
 spec §10) — Phase 2 proceeds only if KPIs beat the Hermes-flat baseline on
 recall-without-search and stay within byte budget.
 
@@ -46,7 +46,7 @@ compaction to one flat 39 KB blob.
         summarizer workers (≤8 concurrent; model TBD per §11-V2)
 ```
 
-Location: `/opt/data/tree-mem/<session_id>/` on the armitage host.
+Location: `<data home>/tree-mem/<session_id>/` on the armitage host.
 In v0 the shadow layer is **read-only with respect to Hermes**: it observes
 state.db and maintains its own store. It does not touch the model's context
 until the injection question (§11-V1) is resolved.
@@ -146,7 +146,7 @@ is counted in build_signals.json (visible in KPI review).
 - Python 3.13 on armitage host (matches the runtime measured in Phase 1;
   stdlib only — jsonl parsing, no sqlite dependency in the tree layer).
 - One process in v0: `tree-mem.py serve --session <sid> --db
-  /opt/data/state.db` polls (10 s) for new messages in Hermes
+  <data home>/state.db` polls (10 s) for new messages in Hermes
   `state.db.messages` and appends them. In v0b (post-§11-V1) ownership
   changes per §11-V4; the poller then acts as BACKFILL only with an
   explicit handoff handshake, never as a second writer.
@@ -168,7 +168,7 @@ is counted in build_signals.json (visible in KPI review).
 ## 7. Rollback / kill switches (unchanged Hermes behavior)
 
 - `systemctl stop tree-mem@<sid>` → Hermes keeps running on its own system.
-- delete the store directory `/opt/data/tree-mem/<sid>/` → complete; Hermes flat compact unaffected.
+- delete the store directory `<data home>/tree-mem/<sid>/` → complete; Hermes flat compact unaffected.
 - Hermes' `/compress` still works; tree layer survives it independently
   (its view is its own, no interaction).
 
@@ -234,7 +234,7 @@ These BLOCK spec approval. Each gets resolved by experiment and recorded here.
 
 - [x] V1 — Context injection mechanism. **RESOLVED 2026-10-08 (option b: MCP
   tool the model calls each turn).** Evidence: `tree-mem` StreamableHTTP MCP
-  server (`/opt/data/scripts/tree-mem-mcp-server.py`, port 4310, bound
+  server (`<data home>/scripts/tree-mem-mcp-server.py`, port 4310, bound
   127.0.0.1) registered in config.yaml and verified via `hermes mcp test
   tree-mem` (✓ Connected, 3 tools discovered). End-to-end calls verified from
   the Hermes container's own venv using the same client path the gateway
@@ -250,7 +250,7 @@ These BLOCK spec approval. Each gets resolved by experiment and recorded here.
 - [x] V2 — Summarizer model + rate limits. **RESOLVED 2026-10-08.** No local
   ollama exists on armitage (probed 4 candidate endpoints: refused/timeout).
   Nous inference API is the only model source; auth lives in
-  `/opt/data/auth.json` (`providers.nous.access_token`, OAuth refresh,
+  `<data home>/auth.json` (`providers.nous.access_token`, OAuth refresh,
   expires ~1 h — 2a must refresh via the portal flow or reuse Hermes'
   client). Findings: `tencent/hy3:free` free period ENDED (the audited
   session's own model is now 404 free); paid `tencent/hy3` blocked
@@ -308,7 +308,7 @@ These BLOCK spec approval. Each gets resolved by experiment and recorded here.
   chat); tree nodes add roughly 1/3 of that per the audit. No secret
   material beyond what state.db already holds — the log contains
   user-verbatim text exactly as state.db does; no new exposure class.
-- **Privacy note:** `/opt/data/tree-mem/` inherits the same Access
+- **Privacy note:** `<data home>/tree-mem/` inherits the same Access
   discipline as state.db (root/agent-writable, not world-readable; chmod
   640 on all files per §4) and is NOT copied to any repo or backup target
   not already containing state.db.
