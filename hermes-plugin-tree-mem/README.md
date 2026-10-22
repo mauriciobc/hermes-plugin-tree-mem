@@ -132,6 +132,45 @@ $HERMES_HOME/tree-mem/<session>/
 - **§6 A turn** — nothing carries over between turns: the view is the only
   continuity.
 
+## Upstream compliance
+
+Verified against the live upstream sources on 2026-10-22 (SHA-matched
+against the local copies, so the comparison is against the current code, not
+a paraphrase):
+
+- `github.com/VictorTaelin/OptMem` — the `memo` tool. Upstream OptMem has
+  **no model call**: the agent writes each summary and hands it back
+  (`memo nap lo-hi "<your line>"`). The model is the agent.
+- `github.com/jonaslsaa/pi-optchat` — the closest runnable implementation:
+  `src/prompts.ts` (the COMPACT contract and the compaction task templates),
+  `src/memory.ts` (the tree, the view, the merge scheduling), and
+  `src/compactor.ts` (the model call).
+
+This plugin implements pi-optchat's *mechanics*, driven by a background
+daemon instead of by the agent in the loop.
+
+| upstream | here |
+|---|---|
+| `NODE = 512` | `LEAF_CAP = 512` |
+| `SOURCE = 100_000` | `MERGE_SOURCE_CAP = 100_000` |
+| `CLIPPED = '(not summarized: zoom it)'` | `Store.clipped_source()` |
+| the contract is the **system** prompt | `{"role": "system", "content": CONTRACT}` |
+| leaf task: `Compaction: compress message {i} into one line...` | same |
+| merge task: `Compaction: merge lines {a} and {b}, adjacent...` | same |
+| the view is framed `'<chat>\n' + lines + '\n</chat>'` | `VIEW_OPEN` |
+| the merge context ends at `end(parent)` — the node being built | same |
+| a source ≤ `NODE` needs **no** model call | same |
+| the reply's `id+n|` head is **stripped** | `Runtime._strip_id_head()` |
+| a line must also **shrink** the source it replaces | `enforce_with_retries` |
+| `flat()` turns newlines into spaces | `flat()` |
+| `due = (T - last) / 2^l` | same |
+
+Two upstream behaviours we had to add late, both found by re-reading the
+source rather than by testing: upstream **strips** a copied `id+n|` head
+instead of rejecting the reply, and it keeps asking until the line is
+**smaller than the source it replaces** ("a merge of two short lines can
+come back nearly as big as both").
+
 ## Operating notes (learned the hard way)
 
 - **A liveness check must observe the output of the work, never the existence
@@ -142,6 +181,13 @@ $HERMES_HOME/tree-mem/<session>/
   survives the launching shell, the process group, and session ends.
 - **One owner per action.** The watchdog owns restarts; the monitor only
   observes. Two owners means nobody owns it.
+- **The summarizer uses FREE models only.** The primary and every fallback
+  are Nous `:free` models on ONE API key. A paid route is reachable only
+  with `TREE_MEM_ALLOW_PAID_FALLBACK=1` set explicitly — it is off by
+  default. The free tier's rate limit is **per API KEY**, not per model, so
+  rotating models does not dodge a 429; back the whole pool off instead.
+  Never probe that key while the daemon is running: the probe steals the
+  daemon's budget.
 - **Free tiers are a moving target.** The summarizer model is a config value,
   not a hard-coded truth.
 

@@ -15,7 +15,22 @@ import os
 import subprocess
 import time
 
-S = "<hermes home>/tree-mem/20260826_170355_abad4b7a-v2"
+def _hermes_home():
+    """Hermes' own home resolver (HERMES_HOME may point anywhere)."""
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home())
+    except Exception:
+        return os.environ.get("HERMES_HOME", "").strip() or os.path.join(
+            os.path.expanduser("~"), ".hermes")
+
+
+def _default(*parts):
+    return os.path.join(_hermes_home(), *parts)
+
+
+S = os.environ.get("TREE_MEM_STORE", "").strip() or _default(
+    "tree-mem", "20260826_170355_abad4b7a-v2")
 STALE_MINUTES = 8
 TOTAL = 5020
 

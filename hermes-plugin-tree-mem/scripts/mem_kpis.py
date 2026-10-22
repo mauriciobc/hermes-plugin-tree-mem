@@ -20,7 +20,7 @@ KPIS (all reported, with pass/fail where thresholds apply):
                                   graded view size (lower=best)
   K7 merge_churn                — rewritten bytes per new message (lower=best)
 
-KNOWN BIAS (spec docs/phase2_tree_memory_spec.md §10): the
+KNOWN BIAS (spec `docs/phase2_tree_memory_spec.md` §10): the
 70% token-overlap fallback in needle_in_context tolerates paraphrase poorly,
 so TREE summaries are likely UNDER-scored vs the flat baseline (which gets
 free hits from the raw recent window). Recalibrate or human-check disputed
@@ -53,6 +53,24 @@ GATES = dict(
 # ---- (a) SESSION LOADING --------------------------------------------------
 
 ARTIFACT_PREFIX = "[CONTEXT COMPACTION — REFERENCE ONLY]"
+
+
+def _hermes_home():
+    """Hermes' own home resolver (HERMES_HOME may point anywhere).
+
+    Guessing a path breaks on any install where the home is set to
+    something else, so resolve through the framework's own resolver.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home())
+    except Exception:
+        return os.environ.get("HERMES_HOME", "").strip() or os.path.join(
+            os.path.expanduser("~"), ".hermes")
+
+
+def _default(*parts):
+    return os.path.join(_hermes_home(), *parts)
 
 
 def load_session_rows(db, sid):
@@ -111,7 +129,18 @@ def tree_context_model(tree_dir, rows=None, units=None):
         vj = os.path.join(tree_dir, "view.json")
         vt = os.path.join(tree_dir, "view.txt")
         if os.path.exists(vj) and not os.path.exists(vt):
-            view = json.load(open(vj))   # [l,i] pairs
+            raw_view = json.load(open(vj))
+            # The live runtime writes view entries as DICTS {"l":..,"i":..};
+            # the Phase-1 audit format is a flat [l, i] pair. Accept both —
+            # assuming the pair shape made the gate crash on a real store
+            # with `unsupported operand type(s) for ** or pow(): 'int' and
+            # 'str'` (it unpacked a dict into the strings "l" and "i").
+            view = []
+            for e in raw_view:
+                if isinstance(e, dict):
+                    view.append((int(e["l"]), int(e["i"])))
+                else:
+                    view.append((int(e[0]), int(e[1])))
             # load all node texts from tree/*.jsonl
             nodes = {}
             for fn in sorted(os.listdir(tree_dir)):
@@ -234,18 +263,20 @@ def user_msg_coverage(units, ctx_text):
 # ---- (f) MAIN ------------------------------------------------------------
 
 def load_units_for_sid(db_path, sid):
-    sys.path.insert(0, "<hermes home>/scripts")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import unii_tree
     return unii_tree.load_units(db_path, sid)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db", default="<hermes home>/state.db")
+    ap.add_argument("--db", default=_default("state.db"))
     ap.add_argument("--session", default="20260826_170355_abad4b7a")
-    ap.add_argument("--tree-dir", default="<hermes home>/unii_audit/20260826_170355_abad4b7a")
+    ap.add_argument("--tree-dir", default=os.environ.get(
+        "TREE_MEM_KPI_TREE_DIR", "").strip() or _default("unii_audit", "20260826_170355_abad4b7a"))
     ap.add_argument("--max-needles", type=int, default=40)
-    ap.add_argument("--artifacts", default="<hermes home>/unii_audit/mem_kpis_report.json")
+    ap.add_argument("--artifacts", default=os.environ.get(
+        "TREE_MEM_KPI_ARTIFACTS", "").strip() or _default("unii_audit", "mem_kpis_report.json"))
     args = ap.parse_args()
 
     db = sqlite3.connect(f"file:{args.db}?mode=ro", uri=True)
