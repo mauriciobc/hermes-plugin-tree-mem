@@ -1,5 +1,5 @@
 name: tree-mem
-version: 1.0.0
+version: 1.1.0
 description: "UniiChat/OptMem tree memory — the chat log compressed into a binary tree of one-line summaries, with a graded 64-128 KB view per turn."
 author: Maurício Castro
 requires_hermes: ">=0.21.0"

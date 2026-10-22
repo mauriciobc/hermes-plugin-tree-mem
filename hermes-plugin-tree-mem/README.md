@@ -84,6 +84,27 @@ hermes plugins install tree-mem        # the provider (inert until the gate)
 python3 scripts/tree-mem-mcp-server.py --root $HERMES_HOME/tree-mem/<session> --port 4310
 ```
 
+**Installing without the catalog.** The loader also takes a Git URL or an
+`owner/repo` shorthand, so the plugin installs straight from its own repo —
+no catalog entry required:
+
+```bash
+hermes plugins install mauriciobc/hermes-plugin-tree-mem/hermes-plugin-tree-mem
+```
+
+The plugin lives in the `hermes-plugin-tree-mem/` subdirectory of the repo,
+so the subdirectory form is the one to use; without it the installer clones
+the repo root and finds no manifest. The loader prints
+`custom (unreviewed) source — not from the Hermes catalog` and installs it
+anyway, as a memory provider named `tree-mem`.
+
+Pin an exact commit when you want reproducibility:
+
+```bash
+hermes plugins install mauriciobc/hermes-plugin-tree-mem/hermes-plugin-tree-mem \
+  --ref 78dfdd151ad79c7334347d7581c7b5dc0381ca3f
+```
+
 and register it:
 
 ```yaml
